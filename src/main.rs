@@ -20,9 +20,11 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows::core::{PCWSTR, Result};
 
 static SEEN_WINDOWS: OnceLock<Mutex<HashSet<isize>>> = OnceLock::new();
+static ENABLED: OnceLock<Mutex<bool>> = OnceLock::new();
 
 const WM_TRAYICON: u32 = WM_USER + 1;
 const ID_TRAY_EXIT: usize = 1;
+const ID_TRAY_TOGGLE: usize = 2;
 
 unsafe extern "system" fn enum_windows_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
     let seen_ptr: *mut Mutex<HashSet<isize>> = lparam.0 as *mut Mutex<HashSet<isize>>;
@@ -99,14 +101,27 @@ unsafe extern "system" fn window_proc(
                 if lparam.0 as u32 == WM_RBUTTONUP {
                     let menu: HMENU = CreatePopupMenu().unwrap();
 
-                    let exit_text: Vec<u16> = "Exit\0".encode_utf16().collect();
+                    let enabled: MutexGuard<'_, bool> = ENABLED.get().unwrap().lock().unwrap();
+                    let toggle_text = if *enabled { "Disable" } else { "Enable" };
+                    drop(enabled);
+
+                    let toggle_w: Vec<u16> = format!("{}\0", toggle_text).encode_utf16().collect();
+                    let exit_w: Vec<u16> = "Exit\0".encode_utf16().collect();
+
+                    let _ = InsertMenuW(
+                        menu,
+                        0,
+                        MENU_ITEM_FLAGS(0),
+                        ID_TRAY_TOGGLE,
+                        PCWSTR(toggle_w.as_ptr()),
+                    );
 
                     let _ = InsertMenuW(
                         menu,
                         0,
                         MENU_ITEM_FLAGS(0),
                         ID_TRAY_EXIT,
-                        PCWSTR(exit_text.as_ptr()),
+                        PCWSTR(exit_w.as_ptr()),
                     );
 
                     let mut point: POINT = Default::default();
@@ -128,9 +143,19 @@ unsafe extern "system" fn window_proc(
             }
 
             WM_COMMAND => {
-                if wparam.0 == ID_TRAY_EXIT {
-                    let _ = DestroyWindow(hwnd);
+                match wparam.0 {
+                    ID_TRAY_EXIT => {
+                        let _ = DestroyWindow(hwnd);
+                    }
+
+                    ID_TRAY_TOGGLE => {
+                        let mut enabled = ENABLED.get().unwrap().lock().unwrap();
+                        *enabled = !*enabled;
+                    }
+
+                    _ => {}
                 }
+
                 LRESULT(0)
             }
 
@@ -147,6 +172,7 @@ unsafe extern "system" fn window_proc(
 fn main() -> Result<()> {
     unsafe {
         SEEN_WINDOWS.set(Mutex::new(HashSet::new())).unwrap();
+        ENABLED.set(Mutex::new(true)).unwrap();
 
         let seen: &Mutex<HashSet<isize>> = SEEN_WINDOWS.get().unwrap();
         let seen_ptr: *mut Mutex<HashSet<isize>> =
