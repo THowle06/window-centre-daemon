@@ -1,15 +1,19 @@
 use std::collections::HashSet;
 use std::sync::{Mutex, OnceLock};
-use std::{thread, time::Duration};
+use std::{
+    thread,
+    time::{Duration, Instant},
+};
 use windows::Win32::Foundation::{HWND, RECT};
 use windows::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook, UnhookWinEvent};
 use windows::Win32::UI::WindowsAndMessaging::{
-    EVENT_SYSTEM_FOREGROUND, GetMessageW, GetSystemMetrics, GetWindowRect, MSG, SM_CXSCREEN,
-    SM_CYSCREEN, SWP_NOSIZE, SWP_NOZORDER, SetWindowPos, WINEVENT_OUTOFCONTEXT,
+    EVENT_SYSTEM_FOREGROUND, GetMessageW, GetSystemMetrics, GetWindowRect, IsZoomed, MSG,
+    SM_CXSCREEN, SM_CYSCREEN, SWP_NOSIZE, SWP_NOZORDER, SetWindowPos, WINEVENT_OUTOFCONTEXT,
 };
 use windows::core::Result;
 
 static SEEN_WINDOWS: OnceLock<Mutex<HashSet<isize>>> = OnceLock::new();
+static START_TIME: OnceLock<Instant> = OnceLock::new();
 
 /// Callback function triggered when a window event occurs
 unsafe extern "system" fn win_event_proc(
@@ -23,6 +27,17 @@ unsafe extern "system" fn win_event_proc(
 ) {
     unsafe {
         if hwnd.0 == 0 {
+            return;
+        }
+
+        // Ignore maximised windows
+        if IsZoomed(hwnd).as_bool() {
+            return;
+        }
+
+        // Ignore early events (existing windows)
+        let start = START_TIME.get().unwrap();
+        if start.elapsed() < std::time::Duration::from_secs(2) {
             return;
         }
 
@@ -57,7 +72,7 @@ unsafe extern "system" fn win_event_proc(
 
         // Calculate centre position
         let x = (screen_width - width) / 2;
-        let y = (screen_width - height) / 2;
+        let y = (screen_height - height) / 2;
 
         // Move window (ignore result silently)
         let _ = SetWindowPos(hwnd, HWND(0), x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
@@ -71,6 +86,7 @@ fn main() -> Result<()> {
         println!("Window centring daemon running...");
 
         SEEN_WINDOWS.set(Mutex::new(HashSet::new())).unwrap();
+        START_TIME.set(Instant::now()).unwrap();
 
         // Set ip the event hook
         let hook = SetWinEventHook(
