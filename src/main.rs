@@ -1,3 +1,6 @@
+use std::collections::HashSet;
+use std::sync::{Mutex, OnceLock};
+use std::{thread, time::Duration};
 use windows::Win32::Foundation::{HWND, RECT};
 use windows::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook, UnhookWinEvent};
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -5,6 +8,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SM_CYSCREEN, SWP_NOSIZE, SWP_NOZORDER, SetWindowPos, WINEVENT_OUTOFCONTEXT,
 };
 use windows::core::Result;
+
+static SEEN_WINDOWS: OnceLock<Mutex<HashSet<isize>>> = OnceLock::new();
 
 /// Callback function triggered when a window event occurs
 unsafe extern "system" fn win_event_proc(
@@ -21,6 +26,17 @@ unsafe extern "system" fn win_event_proc(
             return;
         }
 
+        // Avoid repeated centering
+        let seen = SEEN_WINDOWS.get().unwrap();
+        let mut seen = seen.lock().unwrap();
+
+        if seen.contains(&hwnd.0) {
+            return;
+        }
+
+        // Small delay to allow window to stabilise
+        thread::sleep(Duration::from_millis(50));
+
         // Get window dimensions
         let mut rect = RECT::default();
         if GetWindowRect(hwnd, &mut rect).is_err() {
@@ -29,6 +45,11 @@ unsafe extern "system" fn win_event_proc(
 
         let width = rect.right - rect.left;
         let height = rect.bottom - rect.top;
+
+        // Ignore tiny windows
+        if width < 200 || height < 200 {
+            return;
+        }
 
         // Get screen dimensions
         let screen_width = GetSystemMetrics(SM_CXSCREEN);
@@ -40,12 +61,16 @@ unsafe extern "system" fn win_event_proc(
 
         // Move window (ignore result silently)
         let _ = SetWindowPos(hwnd, HWND(0), x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
+
+        seen.insert(hwnd.0);
     }
 }
 
 fn main() -> Result<()> {
     unsafe {
         println!("Window centring daemon running...");
+
+        SEEN_WINDOWS.set(Mutex::new(HashSet::new())).unwrap();
 
         // Set ip the event hook
         let hook = SetWinEventHook(
