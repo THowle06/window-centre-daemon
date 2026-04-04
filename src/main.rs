@@ -1,30 +1,24 @@
 #![windows_subsystem = "windows"]
 
+mod app_state;
+mod tray;
+mod window;
+
 use std::collections::HashSet;
-use std::sync::{Mutex, MutexGuard, OnceLock};
-use std::{thread, time::Duration};
-use windows::Win32::Foundation::{BOOL, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use std::sync::{Mutex, MutexGuard};
+use windows::Win32::Foundation::{BOOL, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook, UnhookWinEvent};
 use windows::Win32::UI::Shell::{
     NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW, Shell_NotifyIconW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
-    EVENT_SYSTEM_FOREGROUND, EnumWindows, GetCursorPos, GetMessageW, GetSystemMetrics,
-    GetWindowRect, HMENU, IDI_APPLICATION, InsertMenuW, IsZoomed, LoadIconW, MENU_ITEM_FLAGS, MSG,
-    PostQuitMessage, RegisterClassW, SM_CXSCREEN, SM_CYSCREEN, SWP_NOSIZE, SWP_NOZORDER,
-    SetForegroundWindow, SetWindowPos, TPM_BOTTOMALIGN, TPM_LEFTALIGN, TrackPopupMenu,
-    TranslateMessage, WINEVENT_OUTOFCONTEXT, WM_COMMAND, WM_DESTROY, WM_RBUTTONUP, WM_USER,
-    WNDCLASSW,
+    CreateWindowExW, DefWindowProcW, DispatchMessageW, EVENT_SYSTEM_FOREGROUND, EnumWindows,
+    GetMessageW, IDI_APPLICATION, LoadIconW, MSG, RegisterClassW, TranslateMessage,
+    WINEVENT_OUTOFCONTEXT, WM_COMMAND, WM_DESTROY, WM_USER, WNDCLASSW,
 };
 use windows::core::{PCWSTR, Result};
 
-static SEEN_WINDOWS: OnceLock<Mutex<HashSet<isize>>> = OnceLock::new();
-static ENABLED: OnceLock<Mutex<bool>> = OnceLock::new();
-
 const WM_TRAYICON: u32 = WM_USER + 1;
-const ID_TRAY_EXIT: usize = 1;
-const ID_TRAY_TOGGLE: usize = 2;
 
 unsafe extern "system" fn enum_windows_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
     let seen_ptr: *mut Mutex<HashSet<isize>> = lparam.0 as *mut Mutex<HashSet<isize>>;
@@ -47,46 +41,7 @@ unsafe extern "system" fn win_event_proc(
     _thread_id: u32,
     _time: u32,
 ) {
-    unsafe {
-        if hwnd.0 == 0 {
-            return;
-        }
-
-        if IsZoomed(hwnd).as_bool() {
-            return;
-        }
-
-        let seen: &Mutex<HashSet<isize>> = SEEN_WINDOWS.get().unwrap();
-        let mut seen: MutexGuard<'_, HashSet<isize>> = seen.lock().unwrap();
-
-        if seen.contains(&hwnd.0) {
-            return;
-        }
-
-        thread::sleep(Duration::from_millis(50));
-
-        let mut rect: RECT = RECT::default();
-        if GetWindowRect(hwnd, &mut rect).is_err() {
-            return;
-        }
-
-        let width: i32 = rect.right - rect.left;
-        let height: i32 = rect.bottom - rect.top;
-
-        if width < 200 || height < 200 {
-            return;
-        }
-
-        let screen_width: i32 = GetSystemMetrics(SM_CXSCREEN);
-        let screen_height: i32 = GetSystemMetrics(SM_CYSCREEN);
-
-        let x: i32 = (screen_width - width) / 2;
-        let y: i32 = (screen_height - height) / 2;
-
-        let _ = SetWindowPos(hwnd, HWND(0), x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
-
-        seen.insert(hwnd.0);
-    }
+    window::handle_window(hwnd);
 }
 
 unsafe extern "system" fn window_proc(
@@ -95,88 +50,21 @@ unsafe extern "system" fn window_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
-    unsafe {
-        match msg {
-            WM_TRAYICON => {
-                if lparam.0 as u32 == WM_RBUTTONUP {
-                    let menu: HMENU = CreatePopupMenu().unwrap();
-
-                    let enabled: MutexGuard<'_, bool> = ENABLED.get().unwrap().lock().unwrap();
-                    let toggle_text = if *enabled { "Disable" } else { "Enable" };
-                    drop(enabled);
-
-                    let toggle_w: Vec<u16> = format!("{}\0", toggle_text).encode_utf16().collect();
-                    let exit_w: Vec<u16> = "Exit\0".encode_utf16().collect();
-
-                    let _ = InsertMenuW(
-                        menu,
-                        0,
-                        MENU_ITEM_FLAGS(0),
-                        ID_TRAY_TOGGLE,
-                        PCWSTR(toggle_w.as_ptr()),
-                    );
-
-                    let _ = InsertMenuW(
-                        menu,
-                        0,
-                        MENU_ITEM_FLAGS(0),
-                        ID_TRAY_EXIT,
-                        PCWSTR(exit_w.as_ptr()),
-                    );
-
-                    let mut point: POINT = Default::default();
-                    let _ = GetCursorPos(&mut point);
-
-                    let _ = SetForegroundWindow(hwnd);
-
-                    let _ = TrackPopupMenu(
-                        menu,
-                        TPM_LEFTALIGN | TPM_BOTTOMALIGN,
-                        point.x,
-                        point.y,
-                        0,
-                        hwnd,
-                        None,
-                    );
-                }
-                LRESULT(0)
-            }
-
-            WM_COMMAND => {
-                match wparam.0 {
-                    ID_TRAY_EXIT => {
-                        let _ = DestroyWindow(hwnd);
-                    }
-
-                    ID_TRAY_TOGGLE => {
-                        let mut enabled = ENABLED.get().unwrap().lock().unwrap();
-                        *enabled = !*enabled;
-                    }
-
-                    _ => {}
-                }
-
-                LRESULT(0)
-            }
-
-            WM_DESTROY => {
-                PostQuitMessage(0);
-                LRESULT(0)
-            }
-
-            _ => DefWindowProcW(hwnd, msg, wparam, lparam),
-        }
+    match msg {
+        WM_TRAYICON => tray::handle_tray_event(hwnd, lparam),
+        WM_COMMAND => tray::handle_command(hwnd, wparam),
+        WM_DESTROY => tray::handle_destroy(),
+        _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
     }
 }
 
 fn main() -> Result<()> {
     unsafe {
-        SEEN_WINDOWS.set(Mutex::new(HashSet::new())).unwrap();
-        ENABLED.set(Mutex::new(true)).unwrap();
+        app_state::init();
 
-        let seen: &Mutex<HashSet<isize>> = SEEN_WINDOWS.get().unwrap();
+        let state: &app_state::AppState = app_state::get();
         let seen_ptr: *mut Mutex<HashSet<isize>> =
-            seen as *const Mutex<HashSet<isize>> as *mut Mutex<HashSet<isize>>;
+            &state.seen_windows as *const Mutex<HashSet<isize>> as *mut Mutex<HashSet<isize>>;
 
         let _ = EnumWindows(Some(enum_windows_proc), LPARAM(seen_ptr as isize));
 
