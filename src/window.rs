@@ -3,16 +3,36 @@ use std::sync::MutexGuard;
 use std::{thread, time::Duration};
 use windows::Win32::Foundation::{HWND, RECT};
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetSystemMetrics, GetWindowRect, IsZoomed, SM_CXSCREEN, SM_CYSCREEN, SWP_NOSIZE, SWP_NOZORDER,
-    SetWindowPos,
+    GetClassNameW, GetSystemMetrics, GetWindowRect, IsZoomed, SM_CXSCREEN, SM_CYSCREEN, SWP_NOSIZE,
+    SWP_NOZORDER, SetWindowPos,
 };
 
 use crate::app_state;
 
 const WINDOW_SETTLE_DELAY_MS: u64 = 50;
 
+fn is_system_window(hwnd: HWND) -> bool {
+    unsafe {
+        let mut class_name: [u16; 256] = [0u16; 256];
+        let len = GetClassNameW(hwnd, &mut class_name);
+
+        if len == 0 {
+            return false;
+        }
+
+        let name = String::from_utf16_lossy(&class_name[..len as usize]);
+
+        // Filter out Windows system UI
+        name.contains("Windows.UI.Core") || name.contains("Shell_TrayWnd") || name.contains("Start")
+    }
+}
+
 pub fn handle_window(hwnd: HWND) {
     if hwnd.0 == 0 {
+        return;
+    }
+
+    if is_system_window(hwnd) {
         return;
     }
 
